@@ -29,3 +29,7 @@ Example synapse config:
         #bind_dn:
         #bind_password:
         #filter: "(objectClass=posixAccount)"
+        #group_base: "ou=groups,dc=example,dc=com"
+        #group_name: matrix
+        #group_filter: "(objectClass=posixGroup)"
+        #group_attribute: memberUid

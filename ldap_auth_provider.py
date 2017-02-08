@@ -70,6 +70,10 @@ class LdapAuthProvider(object):
             self.ldap_bind_dn = config.bind_dn
             self.ldap_bind_password = config.bind_password
             self.ldap_filter = config.filter
+        self.ldap_group_base = config.group_base
+        self.ldap_group_name = config.group_name
+        self.ldap_group_filter = config.group_filter
+        self.ldap_group_attribute = config.group_attribute
 
     @defer.inlineCallbacks
     def check_password(self, user_id, password):
@@ -98,7 +102,8 @@ class LdapAuthProvider(object):
                     base=self.ldap_base
                 )
                 result, conn = yield self._ldap_simple_bind(
-                    server=server, bind_dn=bind_dn, password=password
+                    server=server, bind_dn=bind_dn, user_name=localpart,
+                    password=password
                 )
                 logger.debug(
                     'LDAP authentication method simple bind returned: '
@@ -210,6 +215,46 @@ class LdapAuthProvider(object):
             logger.warning("Error during ldap authentication: %s", e)
             defer.returnValue(False)
 
+    @defer.inlineCallbacks
+    def _check_group_membership(self, conn, user_id):
+        # construct search_filter like (uid=localpart)
+        query = "(&({prop}={value})({prop2}={value2}))".format(
+            prop=self.ldap_attributes['gid'],
+            value=self.ldap_group_name,
+            prop2=self.ldap_group_attribute,
+            value2=user_id
+        )
+        if self.ldap_group_filter:
+            # combine with the AND expression
+            query = "(&{query}{filter})".format(
+                query=query,
+                filter=self.ldap_group_filter
+            )
+        logger.debug(
+            "LDAP group search filter: %s",
+            query
+        )
+        yield threads.deferToThread(
+            conn.search,
+            search_base=self.ldap_group_base,
+            search_filter=query
+        )
+        logger.debug('LDAP group query response: %s', conn.response)
+        if len(conn.response) == 1:
+            logger.debug(
+                ("Authorization success: '%s' is a member of the LDAP "
+                 "group '%s'"),
+                user_id, self.ldap_group_name
+            )
+            defer.returnValue(True)
+        else:
+            logger.info(
+                ("Authorization failure: '%s' is not a member of the LDAP "
+                 "group '%s'"),
+                user_id, self.ldap_group_name
+            )
+            defer.returnValue(False)
+
     @staticmethod
     def parse_config(config):
         class _LdapConfig(object):
@@ -251,10 +296,17 @@ class LdapAuthProvider(object):
             "mail",
         ])
 
+        ldap_config.group_base = config.get('group_base')
+        ldap_config.group_name = config.get('group_name')
+        ldap_config.group_filter = config.get('group_filter')
+        ldap_config.group_attribute = config.get('group_attribute')
+        if ldap_config.group_name:
+            _require_keys(config['attributes'], ['gid'])
+
         return ldap_config
 
     @defer.inlineCallbacks
-    def _ldap_simple_bind(self, server, bind_dn, password):
+    def _ldap_simple_bind(self, server, bind_dn, user_name, password):
         """ Attempt a simple bind with the credentials
             given by the user against the LDAP server.
 
@@ -289,6 +341,15 @@ class LdapAuthProvider(object):
             if (yield threads.deferToThread(conn.bind)):
                 # GOOD: bind okay
                 logger.debug("LDAP Bind successful in simple bind mode.")
+
+                # Check group membership if configured
+                if self.ldap_group_name:
+                    group_result = yield self._check_group_membership(
+                        conn, user_name
+                    )
+                if not group_result:
+                    defer.returnValue((False, conn))
+
                 defer.returnValue((True, conn))
 
             # BAD: bind failed
@@ -380,7 +441,8 @@ class LdapAuthProvider(object):
                 #       the password for me!
                 yield threads.deferToThread(conn.unbind)
                 result = yield self._ldap_simple_bind(
-                    server=server, bind_dn=user_dn, password=password
+                    server=server, bind_dn=user_dn, user_name=localpart,
+                    password=password
                 )
 
                 defer.returnValue(result)
